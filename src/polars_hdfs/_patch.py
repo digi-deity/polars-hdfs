@@ -91,14 +91,35 @@ def unregister() -> None:
 
 
 def _generated_code(code: types.CodeType, key: str) -> types.CodeType:
+    """Build the hook that replaces ``code``'s body.
+
+    The hook has to declare as many free variables as ``code`` does, or replacing
+    ``__code__`` fails the closure length check. Declaring them is not enough: the
+    interpreter only fills those frame slots when the code also contains
+    ``COPY_FREE_VARS``, which the compiler emits for a function that *references*
+    a free variable. Without it the slots stay uninitialised, and reading them
+    (``frame.f_locals``, debuggers, ``inspect.stack``, pytest tracebacks) crashes
+    the interpreter.
+
+    So the hook is compiled as a closure that references its free variables from
+    dead code. The compiler then emits ``COPY_FREE_VARS``, which fills the frame
+    slots from the function's real closure.
+    """
+    names = [
+        name if name.isidentifier() else f"_free_var_{index}"
+        for index, name in enumerate(code.co_freevars)
+    ]
+    references = ", ".join(names) if names else "None"
     source = (
-        "def _hook(*args, **kwargs):\n"
-        f"    return {_DISPATCH}[{key!r}](*args, **kwargs)\n"
+        "def _make():\n"
+        + "".join(f"    {name} = None\n" for name in names)
+        + "    def _hook(*args, **kwargs):\n"
+        + "        if False:  # reference the free variables without using them\n"
+        + f"            {references}\n"
+        + f"        return {_DISPATCH}[{key!r}](*args, **kwargs)\n"
+        + "    return _hook\n"
     )
     namespace: dict[str, Any] = {}
     exec(compile(source, _SCRIPT, "exec"), namespace)
-    generated: types.CodeType = namespace["_hook"].__code__
-    return generated.replace(
-        co_freevars=tuple(code.co_freevars),
-        co_name=code.co_name,
-    )
+    hook: types.FunctionType = namespace["_make"]()
+    return hook.__code__.replace(co_name=code.co_name)

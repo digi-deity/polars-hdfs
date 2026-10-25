@@ -365,3 +365,56 @@ def test_register_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
         assert pl.read_parquet.__code__ is code
     finally:
         _core.unregister()
+
+
+def _raising_endpoint(*args: Any, **kwargs: Any) -> str:
+    raise RuntimeError("stop here")
+
+
+def test_patched_frame_locals_are_readable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reading a patched frame's locals must not crash the interpreter.
+
+    The generated hook once declared the original function's free variables
+    without initialising them, so ``frame.f_locals`` -- used by debuggers,
+    ``inspect.stack``, and pytest's own traceback formatting -- segfaulted.
+    """
+    seen: dict[str, Any] = {}
+
+    def endpoint(*args: Any, **kwargs: Any) -> str:
+        frame = inspect.currentframe()
+        while frame is not None:
+            if frame.f_code.co_filename == "<polars_hdfs>":
+                seen["locals"] = frame.f_locals
+                break
+            frame = frame.f_back
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(_core, "_endpoint", endpoint)
+    _core.register()
+    try:
+        with pytest.raises(RuntimeError, match="stop here"):
+            pl.read_parquet("hdfs://nn:8020/a.parquet")
+    finally:
+        _core.unregister()
+
+    assert "locals" in seen, "the patched frame should be on the stack"
+    assert set(seen["locals"]) >= {"args", "kwargs"}
+
+
+def test_traceback_frames_are_introspectable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_core, "_endpoint", _raising_endpoint)
+    _core.register()
+    try:
+        try:
+            pl.read_parquet("hdfs://nn:8020/a.parquet")
+        except RuntimeError:
+            tb = sys.exc_info()[2]
+    finally:
+        _core.unregister()
+
+    patched = []
+    while tb is not None:
+        assert tb.tb_frame.f_locals is not None  # used to segfault here
+        patched.append(tb.tb_frame.f_code.co_filename)
+        tb = tb.tb_next
+    assert "<polars_hdfs>" in patched
