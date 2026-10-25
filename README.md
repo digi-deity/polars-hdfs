@@ -104,8 +104,8 @@ URI authority selects the nameservice:
 ```python
 so = {"hdfs_config_dir": "/etc/hadoop/conf"}
 
-cluster_a = pl.scan_parquet("hdfs://cluster-a/data/events", storage_options=so)
-cluster_b = pl.scan_parquet("hdfs://cluster-b/data/users", storage_options=so)
+cluster_a = pl.scan_parquet("hdfs://cluster-a/data/events/", storage_options=so)
+cluster_b = pl.scan_parquet("hdfs://cluster-b/data/users/", storage_options=so)
 
 result = cluster_a.join(cluster_b, on="user_id").collect()
 ```
@@ -114,11 +114,11 @@ Different config directories can also provide different `fs.defaultFS` values:
 
 ```python
 a = pl.scan_parquet(
-    "hdfs:///data/events",
+    "hdfs:///data/events/",
     storage_options={"hdfs_config_dir": "/conf/cluster-a"},
 )
 b = pl.scan_parquet(
-    "hdfs:///data/users",
+    "hdfs:///data/users/",
     storage_options={"hdfs_config_dir": "/conf/cluster-b"},
 )
 ```
@@ -158,6 +158,15 @@ interpreter exit.
 Parquet, CSV, IPC, NDJSON, lines, and Delta are supported, including directory
 and glob sources where polars supports them.
 
+A directory source needs a trailing slash. Without one the path is read as a
+single key, the same way it is on S3:
+
+```python
+pl.scan_parquet("hdfs:///data/events/")           # every file in the directory
+pl.scan_parquet("hdfs:///data/events/*.parquet")  # glob
+pl.scan_parquet("hdfs:///data/events/a.parquet")  # one file
+```
+
 HDFS support is read-only. Writing, `read_avro`, and schema-only helpers are not
 supported.
 
@@ -165,4 +174,24 @@ supported.
 
 ```bash
 python -m pytest
+```
+
+That runs the unit tests, which need no cluster: the gateway is faked.
+
+The tests in `tests/integration` read from real HDFS and are skipped unless
+`POLARS_HDFS_TEST_URI` points at a running namenode. The Docker commands in
+`.github/workflows/integration.yml` are the reference for starting one (or two)
+locally:
+
+```bash
+POLARS_HDFS_TEST_URI=hdfs://localhost:9001 uv run pytest -m integration
+```
+
+`POLARS_HDFS_TEST_URI_2` adds the second cluster used by the multi-cluster join
+test, and `POLARS_HDFS_TEST_BASE` (default `/data`) chooses the directory that
+fixtures are written to and cleaned up from. Seeding uses `hdfs-native`, which is
+what the `integration` extra installs:
+
+```bash
+uv sync --extra dev --extra integration
 ```
