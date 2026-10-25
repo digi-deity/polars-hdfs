@@ -1,0 +1,92 @@
+name: Integration
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  hdfs:
+    name: Two live HDFS clusters
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NAMENODE_IMAGE: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+      DATANODE_IMAGE: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Start two clusters
+        run: |
+          docker network create hdfs
+          for i in 1 2; do
+            docker run -d --name "nn$i" --network hdfs \
+              -p "900$i:9000" -p "987$i:9870" \
+              -e CLUSTER_NAME="cluster$i" \
+              -e CORE_CONF_fs_defaultFS="hdfs://nn$i:9000" \
+              "$NAMENODE_IMAGE"
+            docker run -d --name "dn$i" --network hdfs \
+              -e CLUSTER_NAME="cluster$i" \
+              -e CORE_CONF_fs_defaultFS="hdfs://nn$i:9000" \
+              -e SERVICE_PRECONDITION="nn$i:9870" \
+              "$DATANODE_IMAGE"
+          done
+
+      - name: Wait for both clusters to accept writes
+        run: |
+          for i in 1 2; do
+            echo "== cluster $i =="
+            for _ in $(seq 1 60); do
+              curl -fsS "http://localhost:987$i/" >/dev/null 2>&1 && break
+              sleep 2
+            done
+            docker exec "nn$i" hadoop fs -mkdir -p /data
+            docker exec "nn$i" hadoop fs -chmod -R 777 /data
+
+            ready=""
+            for _ in $(seq 1 45); do
+              if docker exec "nn$i" bash -c \
+                'echo probe > /tmp/probe && hadoop fs -put -f /tmp/probe /data/.probe && hadoop fs -rm -skipTrash /data/.probe' \
+                >/dev/null 2>&1; then
+                ready=yes
+                break
+              fi
+              sleep 2
+            done
+            if [ -z "$ready" ]; then
+              echo "cluster $i never accepted writes"
+              docker logs --tail 40 "nn$i"
+              exit 1
+            fi
+          done
+
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install
+        run: uv sync --extra dev --extra integration
+
+      - name: Test
+        env:
+          POLARS_HDFS_TEST_URI: hdfs://localhost:9001
+          POLARS_HDFS_TEST_URI_2: hdfs://localhost:9002
+        run: uv run --no-sync pytest -m integration -v
+
+      - name: Cluster logs
+        if: failure()
+        run: |
+          for c in nn1 dn1 nn2 dn2; do
+            echo "===== $c ====="
+            docker logs --tail 40 "$c" 2>&1 || true
+          done
