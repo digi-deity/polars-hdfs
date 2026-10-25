@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+import traceback
 import types
 from pathlib import Path
 from typing import Any
@@ -418,3 +419,31 @@ def test_traceback_frames_are_introspectable(monkeypatch: pytest.MonkeyPatch) ->
         patched.append(tb.tb_frame.f_code.co_filename)
         tb = tb.tb_next
     assert "<polars_hdfs>" in patched
+
+
+def test_errors_from_the_original_function_propagate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Errors raised by the wrapped polars function reach the caller unchanged."""
+
+    class Boom(Exception):
+        pass
+
+    def fake(source: str, *, storage_options: Any = None, **kwargs: Any) -> str:
+        raise Boom("original failure")
+
+    monkeypatch.setattr(pl, "read_parquet", fake)
+    monkeypatch.setattr(
+        _core, "_endpoint", lambda *args, **kwargs: "http://127.0.0.1:4321"
+    )
+    _core.register()
+    try:
+        with pytest.raises(Boom, match="original failure") as excinfo:
+            pl.read_parquet("hdfs://nn:8020/a.parquet")
+    finally:
+        _core.unregister()
+
+    names = [frame.name for frame in traceback.extract_tb(excinfo.tb)]
+    assert "fake" in names, "the original function's frame must still be in the traceback"
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
