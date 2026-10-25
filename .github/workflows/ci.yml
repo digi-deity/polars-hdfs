@@ -39,7 +39,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
         include:
           # The native hdfs-s3-gateway dependency ships arm64 Linux wheels.
           - os: ubuntu-24.04-arm
@@ -50,13 +50,17 @@ jobs:
             python-version: "3.12"
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.2
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
           enable-cache: true
           cache-dependency-glob: pyproject.toml
       - name: Install
-        run: uv sync --extra dev
+        # --no-managed-python keeps uv on the matrix interpreter: uv's own
+        # downloads have no final 3.15 build yet.
+        run: uv sync --extra dev --python "${{ matrix.python-version }}" --no-managed-python
       - name: Test
         run: uv run --no-sync pytest
 
