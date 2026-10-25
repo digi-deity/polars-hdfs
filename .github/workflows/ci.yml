@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint & type check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install
+        run: uv sync --extra dev
+      - name: ruff
+        run: uv run --no-sync ruff check --output-format=github .
+      - name: mypy
+        run: uv run --no-sync mypy src
+
+  test:
+    name: Test ${{ matrix.python-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          # The native hdfs-s3-gateway dependency ships arm64 Linux wheels.
+          - os: ubuntu-24.04-arm
+            python-version: "3.12"
+          - os: windows-latest
+            python-version: "3.12"
+          - os: macos-latest
+            python-version: "3.12"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Install
+        run: uv sync --extra dev
+      - name: Test
+        run: uv run --no-sync pytest
+
+  minimum:
+    name: Minimum polars
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Read the polars floor from pyproject.toml
+        id: floor
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import pathlib, re
+
+          text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          floor = re.search(r'"polars>=([0-9][^"]*)"', text).group(1)
+          print(f"polars={floor}")
+          PY
+      - name: Install
+        run: uv sync --extra dev
+      - name: Downgrade to the lowest supported polars
+        run: uv pip install "polars==${{ steps.floor.outputs.polars }}"
+      - name: Test
+        run: uv run --no-sync pytest
+
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+      - name: Build sdist and wheel
+        run: uv build
+      - name: Check metadata
+        run: uvx twine check --strict dist/*
+      - name: Smoke test the wheel
+        run: |
+          uv venv --python 3.12 "$RUNNER_TEMP/smoke"
+          uv pip install --python "$RUNNER_TEMP/smoke" dist/*.whl
+          "$RUNNER_TEMP/smoke/bin/python" - <<'PY'
+          import polars as pl
+          import polars_hdfs
+
+          print("polars", pl.__version__, "exports", polars_hdfs.__all__)
+          assert pl.read_parquet.__code__.co_filename == "<polars_hdfs>"
+          PY
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7

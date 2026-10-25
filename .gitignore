@@ -5,6 +5,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+uv.lock
 .tmp/
 .venv/
 .idea/

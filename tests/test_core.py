@@ -7,10 +7,14 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
+import polars.exceptions as polars_exceptions
 import pytest
-from polars.exceptions import ArgumentRemovedError
 
 from polars_hdfs import _core
+
+# Added in polars 2.0. Older versions cannot run the removed-parameter test, so
+# it is skipped rather than failing at import time.
+_ARGUMENT_REMOVED_ERROR = getattr(polars_exceptions, "ArgumentRemovedError", None)
 
 
 class FakeGateway:
@@ -323,9 +327,15 @@ def test_patch_hooks_alias_captured_before_register(monkeypatch: pytest.MonkeyPa
     assert pl.read_parquet is fake
 
 
+@pytest.mark.skipif(
+    _ARGUMENT_REMOVED_ERROR is None,
+    reason="polars.exceptions.ArgumentRemovedError was added in polars 2.0",
+)
 def test_patch_preserves_signature_and_removed_parameters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    removed_error = _ARGUMENT_REMOVED_ERROR
+    assert removed_error is not None
     fn = pl.read_parquet
     original_code = fn.__code__
     monkeypatch.setattr(
@@ -336,7 +346,7 @@ def test_patch_preserves_signature_and_removed_parameters(
     try:
         assert fn.__code__ is not original_code
         assert "storage_options" in inspect.signature(fn).parameters
-        with pytest.raises(ArgumentRemovedError, match="row_count_name"):
+        with pytest.raises(removed_error, match="row_count_name"):
             fn("hdfs://nn/x.parquet", row_count_name="i")
     finally:
         _core.unregister()
