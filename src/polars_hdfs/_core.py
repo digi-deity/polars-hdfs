@@ -217,7 +217,6 @@ def _start_reader(
             'hdfs_root = "/"',
             f'bucket_name = "{_BUCKET}"',
             f'listen_addr = "{_LISTEN_ADDR}"',
-            f"auth_secret = {_toml(secret)}",
         ]
         if user is not None:
             lines.append(f"hdfs_user = {_toml(user)}")
@@ -231,7 +230,9 @@ def _start_reader(
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as file:
                 file.write("\n".join(lines) + "\n")
-            instance = gateway(config_path=path)
+            # Only the HDFS settings go in the file: the gateway applies keyword
+            # arguments over the parsed config, so the secret stays in memory.
+            instance = gateway(config_path=path, auth_secret=secret)
         finally:
             with suppress(OSError):
                 os.unlink(path)

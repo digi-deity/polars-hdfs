@@ -141,9 +141,12 @@ def test_hdfs_user_options_and_config_dir_use_config_file(
     assert 'hdfs_user = "alice"' in config
     assert f"hdfs_config_dir = {_core._toml(str(tmp_path.resolve()))}" in config
     assert 'hdfs_options = { "dfs.x" = "y" }' in config
-    # The config-file path binds loopback and carries a secret too.
+    # HDFS settings go in the file; the secret is passed as a keyword argument so
+    # it never reaches disk.
     assert 'listen_addr = "127.0.0.1:0"' in config
-    assert any(line.startswith("auth_secret = ") for line in config.splitlines())
+    assert "auth_secret" not in config
+    assert created[0].kwargs["auth_secret"]
+    assert str(created[0].kwargs["config_path"]).endswith(".toml")
 
 
 def test_config_dir_is_canonicalized(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
