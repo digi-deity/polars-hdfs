@@ -226,6 +226,65 @@ def test_translate_keeps_the_path_literal() -> None:
     )
 
 
+def test_credentials_describe_the_reader_for_a_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = install_fake(monkeypatch)
+
+    creds = _core.credentials("hdfs://nn:8020/data/t/year=2025/")
+
+    assert creds.endpoint_url == "http://127.0.0.1:4321"
+    assert creds.s3_uri == "s3://hdfs/data/t/year=2025/"
+    assert creds.bucket == "hdfs"
+    assert creds.access_key_id == "polars-hdfs"
+    assert creds.secret_access_key == created[0].kwargs["auth_secret"]
+    assert len(created) == 1
+
+
+def test_credentials_reuse_the_reader_polars_uses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = install_fake(monkeypatch)
+
+    creds = _core.credentials("hdfs://nn:8020/a.parquet", hdfs_user="alice")
+    _, kwargs = _core._translate_call(
+        ("hdfs://nn:8020/b.parquet",), {"storage_options": {"hdfs_user": "alice"}}
+    )
+
+    assert len(created) == 1
+    assert kwargs["storage_options"]["aws_secret_access_key"] == creds.secret_access_key
+
+
+def test_credentials_storage_options_are_ready_to_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    install_fake(monkeypatch)
+
+    creds = _core.credentials("hdfs://nn:8020/a.parquet")
+
+    assert creds.storage_options() == {
+        "aws_endpoint_url": creds.endpoint_url,
+        "aws_access_key_id": "polars-hdfs",
+        "aws_secret_access_key": creds.secret_access_key,
+        "aws_region": "us-east-1",
+        "aws_allow_http": "true",
+    }
+
+
+def test_credentials_repr_hides_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    install_fake(monkeypatch)
+
+    creds = _core.credentials("hdfs://nn:8020/a.parquet")
+
+    assert creds.secret_access_key not in repr(creds)
+    assert "secret_access_key" not in repr(creds)
+
+
+def test_credentials_reject_other_sources() -> None:
+    with pytest.raises(ValueError, match="hdfs://"):
+        _core.credentials("s3://bucket/key.parquet")
+
+
 def test_non_hdfs_sources_are_ignored() -> None:
     assert _core._translate("local.parquet") is None
     assert _core._translate(b"hdfs://bytes") is None

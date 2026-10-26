@@ -9,8 +9,8 @@ Calls with any other source are passed through unchanged.
     df = pl.read_parquet("hdfs:///data/events.parquet")
 """
 
-from ._core import register, shutdown, unregister
+from ._core import GatewayCredentials, credentials, register, shutdown, unregister
 
-__all__ = ["register", "shutdown", "unregister"]
+__all__ = ["GatewayCredentials", "credentials", "register", "shutdown", "unregister"]
 
 register()

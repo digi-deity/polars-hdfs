@@ -8,7 +8,7 @@ import secrets
 import threading
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -21,6 +21,11 @@ _BUCKET = "hdfs"
 # Loopback only: the gateway is a local permission boundary, not a network service.
 _LISTEN_ADDR = "127.0.0.1:0"
 _SECRET_BYTES = 32
+# Signature key id and region for the gateway. It accepts any access key id and
+# any region scope, so these are fixed rather than generated; only the secret
+# distinguishes one reader from another.
+_ACCESS_KEY_ID = "polars-hdfs"
+_REGION = "us-east-1"
 
 # Only wrap functions that accept storage_options; the rest cannot configure HDFS.
 _FUNCTIONS = (
@@ -48,6 +53,33 @@ class _Reader:
     secret: str
 
 
+@dataclass(frozen=True)
+class GatewayCredentials:
+    """Where to reach the reader for an ``hdfs://`` source, and how to sign.
+
+    Pass these to any S3 client that can talk to a custom endpoint; the whole
+    source is also available as :attr:`s3_uri`, since tools that only speak S3
+    cannot take an ``hdfs://`` path.
+    """
+
+    endpoint_url: str
+    access_key_id: str
+    secret_access_key: str = field(repr=False)
+    bucket: str
+    s3_uri: str
+    region: str = _REGION
+
+    def storage_options(self) -> dict[str, str]:
+        """Options accepted by polars, object_store, and pyarrow S3 helpers."""
+        return {
+            "aws_endpoint_url": self.endpoint_url,
+            "aws_access_key_id": self.access_key_id,
+            "aws_secret_access_key": self.secret_access_key,
+            "aws_region": self.region,
+            "aws_allow_http": "true",
+        }
+
+
 _readers: dict[_ReaderKey, _Reader] = {}
 _lock = threading.Lock()
 
@@ -73,6 +105,39 @@ def shutdown() -> None:
     for reader in readers:
         with suppress(Exception):
             reader.stop()
+
+
+def credentials(
+    uri: str,
+    *,
+    hdfs_user: str | None = None,
+    hdfs_options: Mapping[str, str] | None = None,
+    hdfs_config_dir: str | os.PathLike[str] | None = None,
+) -> GatewayCredentials:
+    """Return how to reach the reader for ``uri``, and how to sign requests.
+
+    Use this to read the same data through another S3 client, such as DuckDB or
+    pyarrow, which cannot open an ``hdfs://`` path. The reader is the one polars
+    reads use for the same settings, so calling this never starts a second one;
+    it stays alive until :func:`shutdown` or interpreter exit.
+    """
+    translated = _translate(uri)
+    if translated is None:
+        raise ValueError("expected an hdfs:// URI")
+    namenode, s3_uri = translated
+    endpoint, secret = _endpoint(
+        namenode,
+        user=hdfs_user,
+        options=hdfs_options,
+        config_dir=hdfs_config_dir,
+    )
+    return GatewayCredentials(
+        endpoint_url=endpoint,
+        access_key_id=_ACCESS_KEY_ID,
+        secret_access_key=secret,
+        bucket=_BUCKET,
+        s3_uri=s3_uri,
+    )
 
 
 def _accepts_storage_options(fn: Any) -> bool:
@@ -112,7 +177,7 @@ def _translate_call(
     # user-supplied anonymous mode is dropped rather than honoured.
     storage_options.pop("aws_skip_signature", None)
     storage_options.update(
-        aws_access_key_id="polars-hdfs",
+        aws_access_key_id=_ACCESS_KEY_ID,
         aws_secret_access_key=secret,
         aws_allow_http="true",
         aws_endpoint_url=endpoint,

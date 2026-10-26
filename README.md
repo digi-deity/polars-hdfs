@@ -153,6 +153,22 @@ number of distinct cluster configurations, not by the number of datasets. Call
 `polars_hdfs.shutdown()` to stop them explicitly; they are also stopped at
 interpreter exit.
 
+## Advanced use
+
+Most tools cannot read HDFS, but plenty of them can read S3. Each `hdfs://`
+source is therefore served by an HDFS reader that presents itself as an S3
+endpoint, and `credentials()` exposes that endpoint when you want another tool to
+read the same data:
+
+```python
+creds = polars_hdfs.credentials("hdfs:///data/events/")
+creds.s3_uri             # s3://hdfs/data/events/
+creds.storage_options()  # endpoint and key pair
+```
+
+It accepts the same `hdfs_user`, `hdfs_options`, and `hdfs_config_dir` keywords
+as `storage_options`.
+
 ## Supported calls
 
 Parquet, CSV, IPC, NDJSON, lines, and Delta are supported, including directory
