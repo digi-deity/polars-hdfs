@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import inspect
-import json
 import os
 import secrets
-import tempfile
 import threading
 from collections.abc import Mapping
 from contextlib import suppress
@@ -203,39 +201,18 @@ def _start_reader(
     # atexit hook, so only pay for it on an actual hdfs:// read.
     from hdfs_s3_gateway import gateway
 
-    if user is None and not options and config_dir is None:
-        instance = gateway(
-            namenode_uri=namenode,
-            hdfs_root="/",
-            bucket_name=_BUCKET,
-            listen_addr=_LISTEN_ADDR,
-            auth_secret=secret,
-        )
-    else:
-        lines = [
-            f"namenode_uri = {_toml(namenode)}",
-            'hdfs_root = "/"',
-            f'bucket_name = "{_BUCKET}"',
-            f'listen_addr = "{_LISTEN_ADDR}"',
-        ]
-        if user is not None:
-            lines.append(f"hdfs_user = {_toml(user)}")
-        if config_dir is not None:
-            lines.append(f"hdfs_config_dir = {_toml(config_dir)}")
-        if options:
-            pairs = ", ".join(f"{_toml(k)} = {_toml(v)}" for k, v in options)
-            lines.append(f"hdfs_options = {{ {pairs} }}")
-
-        fd, path = tempfile.mkstemp(prefix="polars-hdfs-", suffix=".toml")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as file:
-                file.write("\n".join(lines) + "\n")
-            # Only the HDFS settings go in the file: the gateway applies keyword
-            # arguments over the parsed config, so the secret stays in memory.
-            instance = gateway(config_path=path, auth_secret=secret)
-        finally:
-            with suppress(OSError):
-                os.unlink(path)
+    # Everything is passed as keywords: the secret and the HDFS settings never
+    # leave memory, so there is no config file to write or clean up.
+    instance = gateway(
+        namenode_uri=namenode,
+        hdfs_root="/",
+        bucket_name=_BUCKET,
+        listen_addr=_LISTEN_ADDR,
+        auth_secret=secret,
+        hdfs_user=user,
+        hdfs_config_dir=config_dir,
+        hdfs_options=dict(options),
+    )
 
     try:
         instance.start()
@@ -276,8 +253,3 @@ def _resolve_config_dir(config_dir: str | os.PathLike[str] | None) -> str | None
 
 def _canonical_path(path: str) -> str:
     return str(Path(path).expanduser().resolve())
-
-
-def _toml(value: str) -> str:
-    # JSON string escapes are also valid TOML basic-string escapes.
-    return json.dumps(value, ensure_ascii=True)

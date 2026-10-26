@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import sys
+import tempfile
 import traceback
 import types
 from pathlib import Path
@@ -22,8 +23,6 @@ class FakeGateway:
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.args = args
         self.kwargs = kwargs
-        config_path = kwargs.get("config_path") or (args[0] if args else None)
-        self.config = Path(config_path).read_text(encoding="utf-8") if config_path else None
         self.address = "127.0.0.1:4321"
         self.stopped = False
 
@@ -60,6 +59,9 @@ def test_uri_authority_starts_and_reuses_gateway(monkeypatch: pytest.MonkeyPatch
         "bucket_name": "hdfs",
         "listen_addr": "127.0.0.1:0",
         "auth_secret": secret,
+        "hdfs_user": None,
+        "hdfs_config_dir": None,
+        "hdfs_options": {},
     }
 
     assert _core._endpoint("hdfs://nn:8020", user=None, options=None) == (endpoint, secret)
@@ -87,10 +89,9 @@ def test_authorityless_uri_uses_environment_config_dir(
 
     _core._endpoint(None, user=None, options=None)
 
-    config = created[0].config
-    assert config is not None
-    assert 'namenode_uri = "hdfs://"' in config
-    assert f"hdfs_config_dir = {_core._toml(str(tmp_path.resolve()))}" in config
+    kwargs = created[0].kwargs
+    assert kwargs["namenode_uri"] == "hdfs://"
+    assert kwargs["hdfs_config_dir"] == str(tmp_path.resolve())
 
 
 def test_explicit_config_dir_wins_over_environment(
@@ -105,10 +106,7 @@ def test_explicit_config_dir_wins_over_environment(
 
     _core._endpoint(None, user=None, options=None, config_dir=explicit)
 
-    config = created[0].config
-    assert config is not None
-    assert f"hdfs_config_dir = {_core._toml(str(explicit.resolve()))}" in config
-    assert str(fallback.resolve()) not in config
+    assert created[0].kwargs["hdfs_config_dir"] == str(explicit.resolve())
 
 
 def test_default_fs_can_come_from_hdfs_options(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -120,13 +118,12 @@ def test_default_fs_can_come_from_hdfs_options(monkeypatch: pytest.MonkeyPatch) 
         options={"fs.defaultFS": "hdfs://nn:8020"},
     )
 
-    config = created[0].config
-    assert config is not None
-    assert 'namenode_uri = "hdfs://"' in config
-    assert 'hdfs_options = { "fs.defaultFS" = "hdfs://nn:8020" }' in config
+    kwargs = created[0].kwargs
+    assert kwargs["namenode_uri"] == "hdfs://"
+    assert kwargs["hdfs_options"] == {"fs.defaultFS": "hdfs://nn:8020"}
 
 
-def test_hdfs_user_options_and_config_dir_use_config_file(
+def test_hdfs_user_options_and_config_dir_use_keywords(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     created = install_fake(monkeypatch)
@@ -135,18 +132,31 @@ def test_hdfs_user_options_and_config_dir_use_config_file(
         "hdfs://nn:8020", user="alice", options={"dfs.x": "y"}, config_dir=tmp_path
     )
 
-    config = created[0].config
-    assert config is not None
-    assert 'namenode_uri = "hdfs://nn:8020"' in config
-    assert 'hdfs_user = "alice"' in config
-    assert f"hdfs_config_dir = {_core._toml(str(tmp_path.resolve()))}" in config
-    assert 'hdfs_options = { "dfs.x" = "y" }' in config
-    # HDFS settings go in the file; the secret is passed as a keyword argument so
-    # it never reaches disk.
-    assert 'listen_addr = "127.0.0.1:0"' in config
-    assert "auth_secret" not in config
-    assert created[0].kwargs["auth_secret"]
-    assert str(created[0].kwargs["config_path"]).endswith(".toml")
+    kwargs = created[0].kwargs
+    assert kwargs["namenode_uri"] == "hdfs://nn:8020"
+    assert kwargs["hdfs_user"] == "alice"
+    assert kwargs["hdfs_config_dir"] == str(tmp_path.resolve())
+    assert kwargs["hdfs_options"] == {"dfs.x": "y"}
+    assert kwargs["listen_addr"] == "127.0.0.1:0"
+    assert kwargs["auth_secret"]
+    assert "config_path" not in kwargs
+
+
+def test_hdfs_settings_never_touch_disk(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    created = install_fake(monkeypatch)
+
+    def explode(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("HDFS settings must not be written to disk")
+
+    monkeypatch.setattr(tempfile, "mkstemp", explode)
+
+    _core._endpoint(
+        "hdfs://nn:8020", user="alice", options={"dfs.x": "y"}, config_dir=tmp_path
+    )
+
+    assert created[0].kwargs["hdfs_user"] == "alice"
 
 
 def test_config_dir_is_canonicalized(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
