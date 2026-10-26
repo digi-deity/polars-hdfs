@@ -94,6 +94,22 @@ def test_directory_and_glob_sources(cluster: Any) -> None:
     assert globbed.height == 2 * DATA.height
 
 
+def test_hive_partition_directory(cluster: Any) -> None:
+    cluster.write("hive/year=2025/data.parquet", encode(DATA, "parquet"))
+
+    # `=` is in every hive partition path, and it is where double encoding shows
+    # up first: `year=2025` would reach the object store as `year%253D2025`.
+    frame = pl.scan_parquet(cluster.uri_for("hive/year=2025/")).collect()
+
+    assert frame.select(DATA.columns).sort("id").equals(DATA)
+
+
+def test_names_with_spaces_and_non_ascii(cluster: Any) -> None:
+    uri = cluster.write("a b/é.parquet", encode(DATA, "parquet"))
+
+    assert pl.read_parquet(uri).equals(DATA)
+
+
 def test_shutdown_allows_a_fresh_read(cluster: Any) -> None:
     uri = cluster.write("again.parquet", encode(DATA, "parquet"))
     assert pl.read_parquet(uri).equals(DATA)

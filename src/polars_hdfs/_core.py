@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import urlsplit
 
 import polars as pl
 
@@ -122,8 +122,12 @@ def _translate(source: Any) -> tuple[str | None, str] | None:
             )
 
         namenode = f"hdfs://{parts.netloc}" if parts.netloc else None
-        key = unquote(parts.path).lstrip("/")
-        return namenode, f"s3://{_BUCKET}/{quote(key, safe='/-_.~*')}"
+        # The path is passed through literally, the way polars reads local and
+        # s3:// keys: polars percent-encodes the key itself when it builds the
+        # request, so encoding here would apply twice (`year=2025` would be sent
+        # as `year%253D2025` and find nothing) and a name holding a literal
+        # `%3D` would be decoded into a different object.
+        return namenode, f"s3://{_BUCKET}/{parts.path.lstrip('/')}"
 
     if isinstance(source, list | tuple) and any(
         isinstance(item, str) and item[:7].lower() == "hdfs://" for item in source

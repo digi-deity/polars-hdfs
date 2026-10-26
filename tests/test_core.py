@@ -175,9 +175,23 @@ def test_translate_hdfs_uri() -> None:
         "s3://hdfs/a/b.parquet",
     )
     assert _core._translate("hdfs:///a/b.parquet") == (None, "s3://hdfs/a/b.parquet")
-    assert _core._translate("hdfs://nn:8020/a%20b/*.parquet") == (
+    assert _core._translate("hdfs://nn:8020/a/b/*.parquet") == (
         "hdfs://nn:8020",
-        "s3://hdfs/a%20b/*.parquet",
+        "s3://hdfs/a/b/*.parquet",
+    )
+
+
+def test_translate_keeps_the_path_literal() -> None:
+    # polars treats an s3:// key as literal text and percent-encodes it when it
+    # builds the request, so translating must not touch it: encoding would apply
+    # twice, and decoding would silently address a different object.
+    assert _core._translate("hdfs://nn/t/year=2025/a b/é/") == (
+        "hdfs://nn",
+        "s3://hdfs/t/year=2025/a b/é/",
+    )
+    assert _core._translate("hdfs://nn/a%3Db.parquet") == (
+        "hdfs://nn",
+        "s3://hdfs/a%3Db.parquet",
     )
 
 
