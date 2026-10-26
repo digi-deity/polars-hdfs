@@ -51,17 +51,32 @@ def install_fake(monkeypatch: pytest.MonkeyPatch) -> list[FakeGateway]:
 def test_uri_authority_starts_and_reuses_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     created = install_fake(monkeypatch)
 
-    endpoint = _core._endpoint("hdfs://nn:8020", user=None, options=None)
+    endpoint, secret = _core._endpoint("hdfs://nn:8020", user=None, options=None)
     assert endpoint == "http://127.0.0.1:4321"
+    assert len(secret) >= _core._SECRET_BYTES
     assert created[0].kwargs == {
         "namenode_uri": "hdfs://nn:8020",
         "hdfs_root": "/",
         "bucket_name": "hdfs",
         "listen_addr": "127.0.0.1:0",
+        "auth_secret": secret,
     }
 
-    assert _core._endpoint("hdfs://nn:8020", user=None, options=None) == endpoint
+    assert _core._endpoint("hdfs://nn:8020", user=None, options=None) == (endpoint, secret)
     assert len(created) == 1
+
+
+def test_each_reader_gets_its_own_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    created = install_fake(monkeypatch)
+
+    _, first = _core._endpoint("hdfs://a:8020", user=None, options=None)
+    _, second = _core._endpoint("hdfs://b:8020", user=None, options=None)
+
+    assert first != second, "one reader's credentials must not unlock another"
+    assert {created[0].kwargs["auth_secret"], created[1].kwargs["auth_secret"]} == {
+        first,
+        second,
+    }
 
 
 def test_authorityless_uri_uses_environment_config_dir(
@@ -126,6 +141,9 @@ def test_hdfs_user_options_and_config_dir_use_config_file(
     assert 'hdfs_user = "alice"' in config
     assert f"hdfs_config_dir = {_core._toml(str(tmp_path.resolve()))}" in config
     assert 'hdfs_options = { "dfs.x" = "y" }' in config
+    # The config-file path binds loopback and carries a secret too.
+    assert 'listen_addr = "127.0.0.1:0"' in config
+    assert any(line.startswith("auth_secret = ") for line in config.splitlines())
 
 
 def test_config_dir_is_canonicalized(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -223,9 +241,9 @@ def _translate(
         user: str | None,
         options: Any,
         config_dir: Any = None,
-    ) -> str:
+    ) -> tuple[str, str]:
         endpoint_calls.append((namenode, user, options, config_dir))
-        return "http://127.0.0.1:4321"
+        return "http://127.0.0.1:4321", "test-secret"
 
     monkeypatch.setattr(_core, "_endpoint", fake_endpoint)
     if keyword:
@@ -243,7 +261,9 @@ def test_translate_call_injects_connection_options(monkeypatch: pytest.MonkeyPat
         storage_options={
             "aws_region": "eu",
             "aws_endpoint_url": "http://user-supplied",
-            "aws_skip_signature": "false",
+            "aws_skip_signature": "true",
+            "aws_access_key_id": "user-key",
+            "aws_secret_access_key": "user-secret",
         },
     )
 
@@ -252,7 +272,8 @@ def test_translate_call_injects_connection_options(monkeypatch: pytest.MonkeyPat
         "columns": ["x"],
         "storage_options": {
             "aws_region": "eu",
-            "aws_skip_signature": "true",
+            "aws_access_key_id": "polars-hdfs",
+            "aws_secret_access_key": "test-secret",
             "aws_allow_http": "true",
             "aws_endpoint_url": "http://127.0.0.1:4321",
         },
@@ -275,7 +296,8 @@ def test_translate_call_handles_keyword_source(monkeypatch: pytest.MonkeyPatch) 
     assert args == ()
     assert kwargs["source"] == "s3://hdfs/data/a.parquet"
     assert kwargs["storage_options"] == {
-        "aws_skip_signature": "true",
+        "aws_access_key_id": "polars-hdfs",
+        "aws_secret_access_key": "test-secret",
         "aws_allow_http": "true",
         "aws_endpoint_url": "http://127.0.0.1:4321",
     }
@@ -307,7 +329,7 @@ def _fake_reader(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, list[Any]]:
 
     monkeypatch.setattr(pl, "read_parquet", fake)
     monkeypatch.setattr(
-        _core, "_endpoint", lambda *args, **kwargs: "http://127.0.0.1:4321"
+        _core, "_endpoint", lambda *args, **kwargs: ("http://127.0.0.1:4321", "s")
     )
     return fake, calls
 
@@ -331,7 +353,8 @@ def test_patch_hooks_alias_captured_before_register(monkeypatch: pytest.MonkeyPa
             "s3://hdfs/data/a.parquet",
             {
                 "aws_region": "eu",
-                "aws_skip_signature": "true",
+                "aws_access_key_id": "polars-hdfs",
+                "aws_secret_access_key": "s",
                 "aws_allow_http": "true",
                 "aws_endpoint_url": "http://127.0.0.1:4321",
             },
@@ -354,7 +377,7 @@ def test_patch_preserves_signature_and_removed_parameters(
     fn = pl.read_parquet
     original_code = fn.__code__
     monkeypatch.setattr(
-        _core, "_endpoint", lambda *args, **kwargs: "http://127.0.0.1:4321"
+        _core, "_endpoint", lambda *args, **kwargs: ("http://127.0.0.1:4321", "s")
     )
 
     _core.register()
@@ -371,7 +394,7 @@ def test_patch_preserves_signature_and_removed_parameters(
 
 def test_register_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        _core, "_endpoint", lambda *args, **kwargs: "http://127.0.0.1:4321"
+        _core, "_endpoint", lambda *args, **kwargs: ("http://127.0.0.1:4321", "s")
     )
     _core.register()
     try:
@@ -382,7 +405,7 @@ def test_register_is_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
         _core.unregister()
 
 
-def _raising_endpoint(*args: Any, **kwargs: Any) -> str:
+def _raising_endpoint(*args: Any, **kwargs: Any) -> tuple[str, str]:
     raise RuntimeError("stop here")
 
 
@@ -448,7 +471,7 @@ def test_errors_from_the_original_function_propagate(
 
     monkeypatch.setattr(pl, "read_parquet", fake)
     monkeypatch.setattr(
-        _core, "_endpoint", lambda *args, **kwargs: "http://127.0.0.1:4321"
+        _core, "_endpoint", lambda *args, **kwargs: ("http://127.0.0.1:4321", "s")
     )
     _core.register()
     try:

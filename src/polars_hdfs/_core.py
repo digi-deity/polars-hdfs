@@ -5,10 +5,12 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import secrets
 import tempfile
 import threading
 from collections.abc import Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -18,7 +20,9 @@ import polars as pl
 from . import _patch
 
 _BUCKET = "hdfs"
+# Loopback only: the gateway is a local permission boundary, not a network service.
 _LISTEN_ADDR = "127.0.0.1:0"
+_SECRET_BYTES = 32
 
 # Only wrap functions that accept storage_options; the rest cannot configure HDFS.
 _FUNCTIONS = (
@@ -36,7 +40,17 @@ _FUNCTIONS = (
     "scan_delta",
 )
 _ReaderKey = tuple[str, str | None, tuple[tuple[str, str], ...], str | None]
-_readers: dict[_ReaderKey, Any] = {}
+
+
+@dataclass(frozen=True)
+class _Reader:
+    """A running gateway plus the secret polars signs its requests with."""
+
+    instance: Any
+    secret: str
+
+
+_readers: dict[_ReaderKey, _Reader] = {}
 _lock = threading.Lock()
 
 
@@ -56,7 +70,7 @@ def unregister() -> None:
 def shutdown() -> None:
     """Stop all HDFS readers started by the plugin."""
     with _lock:
-        readers = list(_readers.values())
+        readers = [reader.instance for reader in _readers.values()]
         _readers.clear()
     for reader in readers:
         with suppress(Exception):
@@ -90,14 +104,18 @@ def _translate_call(
 
     namenode, s3_uri = translated
     storage_options = dict(kwargs.pop("storage_options", None) or {})
-    endpoint = _endpoint(
+    endpoint, secret = _endpoint(
         namenode,
         user=storage_options.pop("hdfs_user", None),
         options=storage_options.pop("hdfs_options", None),
         config_dir=storage_options.pop("hdfs_config_dir", None),
     )
+    # The gateway requires a valid SigV4 signature once its secret is set, so a
+    # user-supplied anonymous mode is dropped rather than honoured.
+    storage_options.pop("aws_skip_signature", None)
     storage_options.update(
-        aws_skip_signature="true",
+        aws_access_key_id="polars-hdfs",
+        aws_secret_access_key=secret,
         aws_allow_http="true",
         aws_endpoint_url=endpoint,
     )
@@ -142,7 +160,8 @@ def _endpoint(
     user: str | None,
     options: Mapping[str, str] | None,
     config_dir: str | os.PathLike[str] | None = None,
-) -> str:
+) -> tuple[str, str]:
+    """Return the gateway's address and the secret requests must be signed with."""
     if user is not None and not isinstance(user, str):
         raise TypeError("hdfs_user must be a string")
     frozen_options = _freeze_options(options)
@@ -154,12 +173,22 @@ def _endpoint(
     with _lock:
         reader = _readers.get(key)
         if reader is None:
-            reader = _start_reader(
-                resolved_namenode, user, frozen_options, resolved_config_dir
+            # A fresh secret per reader, so another local process cannot reuse the
+            # credentials of a gateway it did not start.
+            secret = secrets.token_urlsafe(_SECRET_BYTES)
+            reader = _Reader(
+                instance=_start_reader(
+                    resolved_namenode,
+                    user,
+                    frozen_options,
+                    resolved_config_dir,
+                    secret=secret,
+                ),
+                secret=secret,
             )
             _readers[key] = reader
 
-    return f"http://{reader.address}"
+    return f"http://{reader.instance.address}", reader.secret
 
 
 def _start_reader(
@@ -167,6 +196,8 @@ def _start_reader(
     user: str | None,
     options: tuple[tuple[str, str], ...],
     config_dir: str | None,
+    *,
+    secret: str,
 ) -> Any:
     # Deferred: importing hdfs_s3_gateway loads a native module that registers an
     # atexit hook, so only pay for it on an actual hdfs:// read.
@@ -178,6 +209,7 @@ def _start_reader(
             hdfs_root="/",
             bucket_name=_BUCKET,
             listen_addr=_LISTEN_ADDR,
+            auth_secret=secret,
         )
     else:
         lines = [
@@ -185,6 +217,7 @@ def _start_reader(
             'hdfs_root = "/"',
             f'bucket_name = "{_BUCKET}"',
             f'listen_addr = "{_LISTEN_ADDR}"',
+            f"auth_secret = {_toml(secret)}",
         ]
         if user is not None:
             lines.append(f"hdfs_user = {_toml(user)}")
